@@ -10,6 +10,11 @@ export const getAppSnapshot = () => invoke<AppSnapshot>('get_app_snapshot');
 
 export const exportData = () => invoke<string>('export_data');
 
+export const importData = (data: string) => invoke<void>('import_data', { data });
+
+export const importDataFromPath = (path: string) =>
+  invoke<void>('import_data_from_path', { path });
+
 export const createTask = (input: TaskInput) =>
   invoke<void>('create_task', { input });
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Error as IoError, ErrorKind};
 
@@ -107,6 +107,119 @@ struct AppSnapshot {
     recent_interruptions: Vec<InterruptionView>,
     overview: OverviewStats,
     daily_stats: Vec<DailyStat>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportTask {
+    id: String,
+    title: String,
+    priority: i64,
+    estimated_pomodoros: i64,
+    #[serde(default)]
+    actual_pomodoros: i64,
+    status: String,
+    today_order: i64,
+    notes: String,
+    scheduled_date: String,
+    #[serde(default)]
+    completed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportSession {
+    id: String,
+    phase_type: String,
+    status: String,
+    task_id: Option<String>,
+    task_title: Option<String>,
+    started_at: String,
+    ended_at: Option<String>,
+    focus_seconds: i64,
+    overlearning_seconds: i64,
+    paused_seconds: i64,
+    pomodoro_index: i64,
+    day_key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportInterruption {
+    id: String,
+    session_id: String,
+    task_title: Option<String>,
+    source: String,
+    note: String,
+    resolution: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ExportAppState {
+    active_timer: Option<StoredActiveTimer>,
+    #[serde(default)]
+    cycle_focus_count: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportPayload {
+    tasks: Vec<ExportTask>,
+    sessions: Vec<ExportSession>,
+    interruptions: Vec<ExportInterruption>,
+    #[serde(default)]
+    app_state: ExportAppState,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportSession {
+    id: String,
+    phase_type: String,
+    status: String,
+    task_id: Option<String>,
+    task_title: Option<String>,
+    started_at: String,
+    ended_at: Option<String>,
+    #[serde(default)]
+    planned_seconds: i64,
+    focus_seconds: i64,
+    overlearning_seconds: i64,
+    paused_seconds: i64,
+    pomodoro_index: i64,
+    day_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyActiveTimer {
+    session_id: String,
+    task_id: Option<String>,
+    task_title: Option<String>,
+    phase_type: String,
+    status: String,
+    started_at: String,
+    ends_at: String,
+    remaining_seconds: i64,
+    planned_seconds: i64,
+    pomodoro_index: i64,
+    overlearning_started_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportPayload {
+    tasks: Vec<ExportTask>,
+    sessions: Vec<ImportSession>,
+    interruptions: Vec<ExportInterruption>,
+    #[serde(default)]
+    app_state: ExportAppState,
+    #[serde(default)]
+    active_timer: Option<LegacyActiveTimer>,
+    #[serde(default)]
+    cycle_focus_count: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,6 +343,22 @@ fn validate_interruption_input(input: &InterruptionInput) -> AppResult<()> {
         "resolution",
     )?;
     Ok(())
+}
+
+fn validate_task_status(value: &str) -> AppResult<()> {
+    ensure_in_choices(value, &["todo", "done"], "task status")
+}
+
+fn validate_session_status(value: &str) -> AppResult<()> {
+    ensure_in_choices(
+        value,
+        &["active", "paused", "completed", "aborted"],
+        "session status",
+    )
+}
+
+fn validate_timer_status(value: &str) -> AppResult<()> {
+    ensure_in_choices(value, &["running", "paused"], "timer status")
 }
 
 fn phase_seconds(phase_type: &str) -> AppResult<i64> {
@@ -664,7 +793,55 @@ fn query_recent_sessions(conn: &Connection) -> AppResult<Vec<SessionView>> {
         .map_err(|error| error.to_string())
 }
 
-fn query_all_sessions(conn: &Connection) -> AppResult<Vec<SessionView>> {
+fn query_export_tasks(conn: &Connection) -> AppResult<Vec<ExportTask>> {
+    let mut statement = conn
+        .prepare(
+            "
+            SELECT
+              t.id,
+              t.title,
+              t.priority,
+              t.estimated_pomodoros,
+              COALESCE((
+                SELECT COUNT(*)
+                FROM sessions s
+                WHERE s.task_id = t.id
+                  AND s.phase_type = 'focus'
+                  AND s.status = 'completed'
+              ), 0) AS actual_pomodoros,
+              t.status,
+              t.today_order,
+              t.notes,
+              t.scheduled_date,
+              t.completed_at
+            FROM tasks t
+            ORDER BY t.scheduled_date ASC, t.today_order ASC, t.title ASC
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(ExportTask {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                priority: row.get(2)?,
+                estimated_pomodoros: row.get(3)?,
+                actual_pomodoros: row.get(4)?,
+                status: row.get(5)?,
+                today_order: row.get(6)?,
+                notes: row.get(7)?,
+                scheduled_date: row.get(8)?,
+                completed_at: row.get(9)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn query_export_sessions(conn: &Connection) -> AppResult<Vec<ExportSession>> {
     let mut statement = conn
         .prepare(
             "
@@ -678,7 +855,7 @@ fn query_all_sessions(conn: &Connection) -> AppResult<Vec<SessionView>> {
 
     let rows = statement
         .query_map([], |row| {
-            Ok(SessionView {
+            Ok(ExportSession {
                 id: row.get(0)?,
                 phase_type: row.get(1)?,
                 status: row.get(2)?,
@@ -729,7 +906,7 @@ fn query_recent_interruptions(conn: &Connection) -> AppResult<Vec<InterruptionVi
         .map_err(|error| error.to_string())
 }
 
-fn query_all_interruptions(conn: &Connection) -> AppResult<Vec<InterruptionView>> {
+fn query_export_interruptions(conn: &Connection) -> AppResult<Vec<ExportInterruption>> {
     let mut statement = conn
         .prepare(
             "
@@ -742,7 +919,7 @@ fn query_all_interruptions(conn: &Connection) -> AppResult<Vec<InterruptionView>
 
     let rows = statement
         .query_map([], |row| {
-            Ok(InterruptionView {
+            Ok(ExportInterruption {
                 id: row.get(0)?,
                 session_id: row.get(1)?,
                 task_title: row.get(2)?,
@@ -953,6 +1130,333 @@ fn fetch_task_for_update(
     .ok_or_else(|| "task not found".into())
 }
 
+fn validate_import_payload(payload: &ExportPayload) -> AppResult<()> {
+    if payload.app_state.cycle_focus_count < 0 {
+        return Err("cycle focus count cannot be negative".into());
+    }
+
+    let mut task_ids = HashSet::new();
+    for task in &payload.tasks {
+        if !task_ids.insert(task.id.clone()) {
+            return Err(format!("duplicate task id: {}", task.id));
+        }
+
+        validate_task_status(&task.status)?;
+        validate_day_key(&task.scheduled_date)?;
+        if let Some(completed_at) = &task.completed_at {
+            parse_iso(completed_at)?;
+        }
+
+        validate_task_input(&TaskInput {
+            title: task.title.clone(),
+            priority: task.priority,
+            estimated_pomodoros: task.estimated_pomodoros,
+            notes: task.notes.clone(),
+            scheduled_date: Some(task.scheduled_date.clone()),
+        })?;
+    }
+
+    let mut session_ids = HashSet::new();
+    for session in &payload.sessions {
+        if !session_ids.insert(session.id.clone()) {
+            return Err(format!("duplicate session id: {}", session.id));
+        }
+
+        phase_seconds(&session.phase_type)?;
+        validate_session_status(&session.status)?;
+        parse_iso(&session.started_at)?;
+        if let Some(ended_at) = &session.ended_at {
+            parse_iso(ended_at)?;
+        }
+        validate_day_key(&session.day_key)?;
+
+        if session.focus_seconds < 0
+            || session.overlearning_seconds < 0
+            || session.paused_seconds < 0
+            || session.pomodoro_index < 0
+        {
+            return Err(format!("session {} contains negative numeric values", session.id));
+        }
+
+        if let Some(task_id) = &session.task_id {
+            if !task_ids.contains(task_id) {
+                return Err(format!(
+                    "session {} references missing task {}",
+                    session.id, task_id
+                ));
+            }
+        }
+    }
+
+    let mut interruption_ids = HashSet::new();
+    for interruption in &payload.interruptions {
+        if !interruption_ids.insert(interruption.id.clone()) {
+            return Err(format!("duplicate interruption id: {}", interruption.id));
+        }
+
+        ensure_in_choices(&interruption.source, &["internal", "external"], "source")?;
+        ensure_in_choices(
+            &interruption.resolution,
+            &["postpone", "pause", "abort"],
+            "resolution",
+        )?;
+        parse_iso(&interruption.created_at)?;
+
+        if !session_ids.contains(&interruption.session_id) {
+            return Err(format!(
+                "interruption {} references missing session {}",
+                interruption.id, interruption.session_id
+            ));
+        }
+    }
+
+    if let Some(active_timer) = &payload.app_state.active_timer {
+        validate_timer_status(&active_timer.status)?;
+        phase_seconds(&active_timer.phase_type)?;
+        parse_iso(&active_timer.started_at)?;
+        parse_iso(&active_timer.ends_at)?;
+
+        if let Some(value) = &active_timer.overlearning_started_at {
+            parse_iso(value)?;
+        }
+        if let Some(value) = &active_timer.paused_at {
+            parse_iso(value)?;
+        }
+        if let Some(value) = &active_timer.last_resumed_at {
+            parse_iso(value)?;
+        }
+
+        if active_timer.remaining_seconds < 0
+            || active_timer.planned_seconds < 0
+            || active_timer.pomodoro_index < 0
+            || active_timer.focus_elapsed_seconds < 0
+            || active_timer.overlearning_elapsed_seconds < 0
+            || active_timer.paused_seconds < 0
+        {
+            return Err("active timer contains negative numeric values".into());
+        }
+
+        if !session_ids.contains(&active_timer.session_id) {
+            return Err(format!(
+                "active timer references missing session {}",
+                active_timer.session_id
+            ));
+        }
+
+        if let Some(task_id) = &active_timer.task_id {
+            if !task_ids.contains(task_id) {
+                return Err(format!(
+                    "active timer references missing task {}",
+                    task_id
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn derive_completed_at(
+    task: &ExportTask,
+    latest_completed_focus_end: &HashMap<String, String>,
+) -> Option<String> {
+    if let Some(completed_at) = &task.completed_at {
+        return Some(completed_at.clone());
+    }
+
+    if task.status == "done" {
+        return latest_completed_focus_end.get(&task.id).cloned();
+    }
+
+    None
+}
+
+fn normalize_import_payload(input: ImportPayload) -> ExportPayload {
+    let sessions = input
+        .sessions
+        .into_iter()
+        .map(|session| {
+            let _ = session.planned_seconds;
+            ExportSession {
+                id: session.id,
+                phase_type: session.phase_type,
+                status: session.status,
+                task_id: session.task_id,
+                task_title: session.task_title,
+                started_at: session.started_at,
+                ended_at: session.ended_at,
+                focus_seconds: session.focus_seconds,
+                overlearning_seconds: session.overlearning_seconds,
+                paused_seconds: session.paused_seconds,
+                pomodoro_index: session.pomodoro_index,
+                day_key: session.day_key,
+            }
+        })
+        .collect();
+
+    let legacy_active_timer = input.active_timer.map(|timer| {
+        let elapsed_seconds = (timer.planned_seconds - timer.remaining_seconds).max(0);
+        StoredActiveTimer {
+            session_id: timer.session_id,
+            task_id: timer.task_id,
+            task_title: timer.task_title,
+            phase_type: timer.phase_type,
+            status: timer.status,
+            started_at: timer.started_at.clone(),
+            ends_at: timer.ends_at,
+            remaining_seconds: timer.remaining_seconds,
+            planned_seconds: timer.planned_seconds,
+            pomodoro_index: timer.pomodoro_index,
+            overlearning_started_at: timer.overlearning_started_at,
+            paused_at: None,
+            last_resumed_at: Some(timer.started_at),
+            focus_elapsed_seconds: elapsed_seconds,
+            overlearning_elapsed_seconds: 0,
+            paused_seconds: 0,
+        }
+    });
+
+    let mut app_state = input.app_state;
+    if app_state.active_timer.is_none() {
+        app_state.active_timer = legacy_active_timer;
+    }
+    if app_state.cycle_focus_count == 0 {
+        app_state.cycle_focus_count = input.cycle_focus_count.unwrap_or(0);
+    }
+
+    ExportPayload {
+        tasks: input.tasks,
+        sessions,
+        interruptions: input.interruptions,
+        app_state,
+    }
+}
+
+fn parse_import_payload(data: &str) -> AppResult<ExportPayload> {
+    let payload: ImportPayload =
+        serde_json::from_str(data).map_err(|error| format!("invalid import JSON: {error}"))?;
+    Ok(normalize_import_payload(payload))
+}
+
+fn replace_data(conn: &mut Connection, payload: ExportPayload) -> AppResult<()> {
+    validate_import_payload(&payload)?;
+
+    let mut latest_completed_focus_end: HashMap<String, String> = HashMap::new();
+    for session in &payload.sessions {
+        if session.phase_type == "focus" && session.status == "completed" {
+            if let (Some(task_id), Some(ended_at)) = (&session.task_id, &session.ended_at) {
+                let next = parse_iso(ended_at)?;
+                match latest_completed_focus_end.get(task_id) {
+                    Some(current) if parse_iso(current)? >= next => {}
+                    _ => {
+                        latest_completed_focus_end
+                            .insert(task_id.clone(), ended_at.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+
+    tx.execute_batch(
+        "
+        DELETE FROM interruptions;
+        DELETE FROM sessions;
+        DELETE FROM tasks;
+        DELETE FROM app_state;
+        ",
+    )
+    .map_err(|error| error.to_string())?;
+
+    for task in payload.tasks {
+        tx.execute(
+            "
+            INSERT INTO tasks (
+              id, title, priority, estimated_pomodoros, status, today_order, notes, scheduled_date, completed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ",
+            params![
+                task.id,
+                task.title.trim(),
+                task.priority,
+                task.estimated_pomodoros,
+                task.status,
+                task.today_order,
+                task.notes.trim(),
+                task.scheduled_date,
+                derive_completed_at(&task, &latest_completed_focus_end),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    for session in payload.sessions {
+        tx.execute(
+            "
+            INSERT INTO sessions (
+              id, phase_type, status, task_id, task_title, started_at, ended_at,
+              focus_seconds, overlearning_seconds, paused_seconds, pomodoro_index, day_key
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            ",
+            params![
+                session.id,
+                session.phase_type,
+                session.status,
+                session.task_id,
+                session.task_title,
+                session.started_at,
+                session.ended_at,
+                session.focus_seconds,
+                session.overlearning_seconds,
+                session.paused_seconds,
+                session.pomodoro_index,
+                session.day_key,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    for interruption in payload.interruptions {
+        tx.execute(
+            "
+            INSERT INTO interruptions (id, session_id, task_title, source, note, resolution, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ",
+            params![
+                interruption.id,
+                interruption.session_id,
+                interruption.task_title,
+                interruption.source,
+                interruption.note.trim(),
+                interruption.resolution,
+                interruption.created_at,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    if let Some(active_timer) = payload.app_state.active_timer {
+        let serialized = serde_json::to_string(&active_timer).map_err(|error| error.to_string())?;
+        tx.execute(
+            "INSERT INTO app_state (key, value) VALUES (?1, ?2)",
+            params![ACTIVE_TIMER_KEY, serialized],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    tx.execute(
+        "INSERT INTO app_state (key, value) VALUES (?1, ?2)",
+        params![
+            CYCLE_FOCUS_COUNT_KEY,
+            payload.app_state.cycle_focus_count.to_string()
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+
+    tx.commit().map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn get_app_snapshot(app: AppHandle) -> AppResult<AppSnapshot> {
     let conn = open_connection(&app)?;
@@ -965,33 +1469,9 @@ fn export_data(app: AppHandle) -> AppResult<String> {
     let conn = open_connection(&app)?;
     sync_active_timer(&conn, &app)?;
 
-    let tasks = query_task_views(
-        &conn,
-        "
-        SELECT
-          t.id,
-          t.title,
-          t.priority,
-          t.estimated_pomodoros,
-          COALESCE((
-            SELECT COUNT(*)
-            FROM sessions s
-            WHERE s.task_id = t.id
-              AND s.phase_type = 'focus'
-              AND s.status = 'completed'
-          ), 0),
-          t.status,
-          t.today_order,
-          t.notes,
-          t.scheduled_date
-        FROM tasks t
-        WHERE t.scheduled_date >= ?1 OR t.scheduled_date < ?1
-        ORDER BY t.scheduled_date ASC, t.today_order ASC
-        ",
-        "0000-01-01",
-    )?;
-    let sessions = query_all_sessions(&conn)?;
-    let interruptions = query_all_interruptions(&conn)?;
+    let tasks = query_export_tasks(&conn)?;
+    let sessions = query_export_sessions(&conn)?;
+    let interruptions = query_export_interruptions(&conn)?;
     let active_timer = get_active_timer(&conn)?;
     let cycle_focus_count = get_cycle_focus_count(&conn)?;
 
@@ -1005,6 +1485,27 @@ fn export_data(app: AppHandle) -> AppResult<String> {
         }
     }))
     .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn import_data(app: AppHandle, data: String) -> AppResult<()> {
+    let mut conn = open_connection(&app)?;
+    let payload = parse_import_payload(&data)?;
+    println!(
+        "import_data payload parsed: tasks={}, sessions={}, interruptions={}",
+        payload.tasks.len(),
+        payload.sessions.len(),
+        payload.interruptions.len()
+    );
+    replace_data(&mut conn, payload)
+}
+
+#[tauri::command]
+fn import_data_from_path(app: AppHandle, path: String) -> AppResult<()> {
+    println!("import_data_from_path path={path}");
+    let data = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read import file {path}: {error}"))?;
+    import_data(app, data)
 }
 
 #[tauri::command]
@@ -1344,8 +1845,112 @@ fn record_interruption(app: AppHandle, input: InterruptionInput) -> AppResult<()
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn in_memory_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        init_schema(&conn).expect("init schema");
+        conn
+    }
+
+    #[test]
+    fn imports_legacy_payload_shape() {
+        let raw = r#"
+        {
+          "exportedAt": "2026-03-30T08:16:11Z",
+          "appVersion": "0.3.0",
+          "activeTimer": {
+            "sessionId": "session-1",
+            "taskId": "task-1",
+            "taskTitle": "Legacy Task",
+            "phaseType": "focus",
+            "status": "running",
+            "startedAt": "2026-03-30T07:57:51Z",
+            "endsAt": "2026-03-30T08:22:51Z",
+            "remainingSeconds": 400,
+            "plannedSeconds": 1500,
+            "pomodoroIndex": 1,
+            "overlearningStartedAt": null
+          },
+          "tasks": [
+            {
+              "id": "task-1",
+              "title": "Legacy Task",
+              "priority": 2,
+              "estimatedPomodoros": 2,
+              "status": "todo",
+              "todayOrder": 1,
+              "notes": "",
+              "scheduledDate": "2026-03-30",
+              "createdAt": "2026-03-30T02:45:40Z",
+              "completedAt": null
+            }
+          ],
+          "sessions": [
+            {
+              "id": "session-1",
+              "taskId": "task-1",
+              "taskTitle": "Legacy Task",
+              "phaseType": "focus",
+              "status": "active",
+              "startedAt": "2026-03-30T07:57:51Z",
+              "endedAt": null,
+              "plannedSeconds": 1500,
+              "focusSeconds": 0,
+              "overlearningSeconds": 0,
+              "pausedSeconds": 0,
+              "pomodoroIndex": 1,
+              "dayKey": "2026-03-30"
+            }
+          ],
+          "interruptions": []
+        }
+        "#;
+
+        let payload = parse_import_payload(raw).expect("parse import payload");
+        let mut conn = in_memory_conn();
+        replace_data(&mut conn, payload).expect("import into sqlite");
+
+        let task_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+            .expect("count tasks");
+        let session_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .expect("count sessions");
+
+        assert_eq!(task_count, 1);
+        assert_eq!(session_count, 1);
+        assert!(get_active_timer(&conn).expect("read active timer").is_some());
+    }
+
+    #[test]
+    fn imports_external_fixture_when_requested() {
+        let Some(path) = std::env::var_os("POMODORO_IMPORT_FILE") else {
+            return;
+        };
+
+        let raw = fs::read_to_string(path).expect("read import fixture");
+        let payload = parse_import_payload(&raw).expect("parse external payload");
+        let mut conn = in_memory_conn();
+        replace_data(&mut conn, payload).expect("import external payload");
+
+        let task_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+            .expect("count tasks");
+        let session_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .expect("count sessions");
+
+        assert!(task_count > 0);
+        assert!(session_count > 0);
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             open_connection(&app.handle())
@@ -1355,6 +1960,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
             export_data,
+            import_data,
+            import_data_from_path,
             create_task,
             update_task,
             move_task,

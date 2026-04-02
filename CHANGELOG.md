@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.6.1 - 2026-04-02
+
+Import and desktop dialog fix release.
+
+### Added
+
+- Added full JSON import on the frontend and backend
+- Added compatibility parsing for legacy exports with top-level `activeTimer`
+- Added import validation for ids, enums, timestamps, references, and non-negative counters
+- Added import regression tests, including an external fixture path test
+- Added Tauri dialog plugin integration for native file selection
+
+### Changed
+
+- Import now replaces local SQLite data atomically after validation
+- Sidebar import flow now uses the native Tauri file picker instead of a hidden browser file input
+- Default desktop capability now explicitly grants `dialog:allow-open`
+
+### Verified
+
+- Frontend build passed via `npm run build`
+- Rust/Tauri backend check passed via `cargo check`
+- Legacy import test passed via `cargo test imports_legacy_payload_shape`
+- External fixture import test passed via `env POMODORO_IMPORT_FILE=/Users/mac/Downloads/test-podomo.json cargo test imports_external_fixture_when_requested`
+
 ## 0.5.0 - 2026-04-01
 
 Initial runnable desktop baseline generated from `dev-spec.md`.

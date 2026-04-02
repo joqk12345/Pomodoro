@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
 import {
   abortActiveTimer,
   cloneTaskToInput,
@@ -7,6 +8,7 @@ import {
   deleteTask,
   exportData,
   getAppSnapshot,
+  importDataFromPath,
   markActiveTaskCompleted,
   moveTask,
   pauseActiveTimer,
@@ -386,6 +388,38 @@ export default function App() {
     }
   };
 
+  const handleImport = async () => {
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        filters: [
+          {
+            name: 'JSON',
+            extensions: ['json'],
+          },
+        ],
+      });
+
+      if (!selected || Array.isArray(selected)) {
+        return;
+      }
+
+      const confirmed = window.confirm(
+        '导入会覆盖当前本地全部任务、记录和计时状态，是否继续？',
+      );
+      if (!confirmed) {
+        return;
+      }
+
+      await runMutation('import-data', () => importDataFromPath(selected));
+      setPhaseAlert('导入完成');
+      window.setTimeout(() => setPhaseAlert(null), 4000);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
   const beginEdit = (task: TaskView) => {
     setEditingId(task.id);
     setEditingTask(cloneTaskToInput(task));
@@ -396,7 +430,7 @@ export default function App() {
       <div className="backdrop" />
       <aside className="sidebar">
         <div>
-          <p className="eyebrow">Pomodoro 0.5.0</p>
+          <p className="eyebrow">Pomodoro 0.6.1</p>
           <h1>Work the plan. Then count the cycle.</h1>
           <p className="sidebar-copy">
             一个本地优先、任务驱动、显式处理中断与 overlearning 的桌面番茄工作台。
@@ -423,6 +457,16 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-footer">
+          <button
+            className="ghost-button"
+            disabled={busy !== null}
+            onClick={() => {
+              void handleImport();
+            }}
+            type="button"
+          >
+            导入完整 JSON
+          </button>
           <button
             className="ghost-button"
             disabled={busy !== null}

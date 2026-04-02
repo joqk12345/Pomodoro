@@ -12,7 +12,7 @@ Pomodoro 是一个本地优先、任务驱动、带中断处理与 overlearning 
 
 ## 当前实现
 
-当前基线版本：`0.5.0`
+当前基线版本：`0.6.1`
 
 已实现的主流程：
 
@@ -29,6 +29,8 @@ Pomodoro 是一个本地优先、任务驱动、带中断处理与 overlearning 
 - 今日概览统计
 - 最近 14 天趋势统计
 - 完整 JSON 导出
+- 完整 JSON 导入
+- 兼容旧版导出格式导入
 - `active_timer` 和 `cycle_focus_count` 持久化到本地 SQLite
 
 ## 技术栈
@@ -39,6 +41,7 @@ Pomodoro 是一个本地优先、任务驱动、带中断处理与 overlearning 
 - Tauri 2
 - Rust
 - SQLite (`rusqlite`)
+- `tauri-plugin-dialog`
 - `tauri-plugin-notification`
 
 ## 项目结构
@@ -105,8 +108,8 @@ npm run build:multi -- --preset mac
 
 ```bash
 ./scripts/check-version.sh
-./scripts/sync-version.sh 0.6.0
-./scripts/release.sh 0.6.0
+./scripts/sync-version.sh 0.6.1
+./scripts/release.sh 0.6.1
 ```
 
 GitHub Actions：
@@ -143,6 +146,12 @@ cargo check
 - `active_timer`
 - `cycle_focus_count`
 
+导入说明：
+
+- 侧边栏的“导入完整 JSON”会覆盖当前本地全部数据
+- 当前支持导入本仓库 `0.6.x` 导出的完整 JSON
+- 兼容导入旧版顶层 `activeTimer` 结构
+
 ## 业务约束
 
 - 任务状态只有 `todo | done`
@@ -166,6 +175,8 @@ cargo check
 
 - `npm run build`
 - `cargo check`
+- `cargo test imports_legacy_payload_shape`
+- `env POMODORO_IMPORT_FILE=/Users/mac/Downloads/test-podomo.json cargo test imports_external_fixture_when_requested`
 
 ## 后续建议
 
