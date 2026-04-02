@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, for example v0.6.0
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+jobs:
+  build:
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            name: macos-aarch64
+          - os: macos-14
+            target: x86_64-apple-darwin
+            name: macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+
+    runs-on: ${{ matrix.platform.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Validate release version alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          ./scripts/check-version.sh "${VERSION}"
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.platform.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build release bundle
+        run: npm run tauri build -- --target ${{ matrix.platform.target }}
+
+      - name: Prepare release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+
+          copy_if_exists() {
+            local dir="$1"
+            local pattern="$2"
+            if [[ -d "$dir" ]]; then
+              find "$dir" -name "$pattern" -exec cp {} release/ \;
+            fi
+          }
+
+          BUNDLE_ROOT="src-tauri/target/${{ matrix.platform.target }}/release/bundle"
+
+          if [[ "${{ matrix.platform.os }}" == "ubuntu-22.04" ]]; then
+            copy_if_exists "${BUNDLE_ROOT}/deb" "*.deb"
+            copy_if_exists "${BUNDLE_ROOT}/appimage" "*.AppImage"
+          elif [[ "${{ matrix.platform.os }}" == macos-* ]]; then
+            copy_if_exists "${BUNDLE_ROOT}/dmg" "*.dmg"
+          elif [[ "${{ matrix.platform.os }}" == "windows-latest" ]]; then
+            copy_if_exists "${BUNDLE_ROOT}/msi" "*.msi"
+            find "${BUNDLE_ROOT}" -name "*.exe" -exec cp {} release/ \;
+          fi
+
+          ls -lh release/
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform.name }}
+          path: release/*
+
+  publish:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+
+      - name: Flatten release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p final_release
+          for dir in release/*; do
+            if [[ -d "$dir" ]]; then
+              cp -R "$dir"/. final_release/
+            fi
+          done
+          ls -lh final_release/
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: final_release/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

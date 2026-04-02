@@ -101,6 +101,21 @@ npm run build:multi
 npm run build:multi -- --preset mac
 ```
 
+版本同步与发布：
+
+```bash
+./scripts/check-version.sh
+./scripts/sync-version.sh 0.6.0
+./scripts/release.sh 0.6.0
+```
+
+GitHub Actions：
+
+- [ci.yml](/Users/mac/Documents/workspace/Data/01_Work/Projects/books/ai-coding/Pomodoro/.github/workflows/ci.yml)
+  在 `push` / `pull_request` 时执行版本校验、前端构建和 Rust 检查
+- [release.yml](/Users/mac/Documents/workspace/Data/01_Work/Projects/books/ai-coding/Pomodoro/.github/workflows/release.yml)
+  在 `v*` tag push 或手动触发时构建并发布多平台安装包
+
 检查 Rust / Tauri 后端：
 
 ```bash
